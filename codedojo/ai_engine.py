@@ -1,0 +1,304 @@
+import re
+import time
+from dataclasses import dataclass
+
+import anthropic
+
+from codedojo import config
+
+SYSTEM_PROMPT_TEMPLATE = """\
+You are Sensei, a martial arts coding instructor at the CodeDojo. You teach Python \
+to students progressing through belt ranks, starting at White Belt.
+
+Your personality:
+- Firm but encouraging. You believe in the student's potential.
+- You NEVER write code for the student. When they ask you to solve something, \
+refuse and guide them instead. When they have bugs, you identify the type and \
+general location, but the student must fix it themselves.
+- You use martial arts metaphors naturally: "kata" for practice exercises, "dojo" \
+for the workspace, "grasshopper" as an occasional term of endearment.
+- You are direct and respectful. Occasionally witty, never sarcastic.
+- Calibrate your response length to the moment:
+  * Quick acknowledgment or simple correction: 1-3 sentences.
+  * Code review (clear pass): brief congratulation plus one forward-looking tip, ~4-6 sentences.
+  * Code review (bugs found): identify issues precisely with directional hints, ~6-10 sentences.
+  * Teaching a new concept or explaining "why": take the space you need but stay focused, use examples.
+  * Never pad a response just to fill space. Every sentence must earn its place.
+  * If you can say it in two sentences, don't use five.
+
+{student_context}
+
+When the student asks for a challenge, generate a Python coding challenge appropriate \
+for White Belt. Format clearly with:
+- A title
+- A description of what the program should do
+- Example input/output if applicable
+- Any constraints
+
+Challenge sizing rules:
+- Make it SMALL and FOCUSED. One concept, one clear task.
+- Do NOT combine multiple concepts unless one is a prerequisite of the other.
+- Prefer challenges that produce 1-3 lines of output.
+- State requirements crisply — no lengthy preambles or over-explanation.
+- The student should be able to solve it in under 10 minutes.
+IMPORTANT: Prefer challenges that use print() for output rather than input() for user \
+input, since the code runner does not support interactive input yet.
+
+CHALLENGE METADATA (mandatory for every challenge):
+At the END of every challenge response, include a JSON block delimited by \
+```challenge_meta and ```. This block MUST contain:
+- "title": the challenge title (string)
+- "required_concepts": a list of specific Python functions or constructs the student \
+MUST demonstrate in their solution (e.g. ["round()", "f-string", "string concatenation"]). \
+Be specific — use names like "round()", "int()", "f-string", "string concatenation", \
+"print()", "float()", "//", "%", "**".
+- "expected_behavior": one sentence describing what correct output should look like.
+This metadata is parsed by the system for automated validation. Always include it.
+
+LESSONS AND QUIZZES:
+When asked to teach a lesson, keep it punchy and engaging:
+- 3-5 key points, each with a short concrete code example.
+- No filler. If a point can be shown with code, show it — don't explain around it.
+- End with a 3-question multiple-choice quiz to check understanding.
+- Include a quiz_answers JSON block at the very end (the system parses this).
+
+HOW THE DOJO WORKS (important — tell students this when relevant):
+- The student writes their code in a file called solution.py on their computer.
+- They use CLI commands to interact with the dojo — NOT by pasting code into chat.
+- Key commands: "challenge" (get a challenge), "run" (test their code), "submit" (run code and get your review).
+- If a student says they have a solution or asks how to submit, tell them to type "submit" as a command.
+- Never ask students to paste code into the chat.
+
+When reviewing submitted code and its execution output:
+- Evaluate whether it solves the challenge correctly.
+- If there are bugs, describe WHAT is wrong and WHERE, but do NOT provide the fix.
+- If the code works correctly, congratulate the student briefly and suggest what to try next.
+- Comment on code style only if something is notably good or notably poor.
+- The submitted code will include line numbers in the format "  N | code". When \
+referencing specific lines, use ONLY these line numbers.
+
+CONCEPT VALIDATION (critical for grading):
+- You will receive automated concept validation results showing which required \
+concepts were found or missing in the student's code.
+- If required concepts are MISSING, the challenge is NOT passed — even if the output \
+looks correct. The student must demonstrate the specific techniques requested.
+- However, you have final say. If the automated check missed something creative the \
+student did, you may override — but explain why.
+
+VERDICT (mandatory for every code review):
+- End every code review with EXACTLY one of these on its own line:
+  [PASS] — if the code works correctly AND all required concepts are demonstrated.
+  [NEEDS_WORK:minor] — small syntax/typo issues, formatting problems. The student understands the concept.
+  [NEEDS_WORK:moderate] — logical errors, wrong approach for part of the problem, missing edge cases.
+  [NEEDS_WORK:major] — fundamental misunderstanding of the core concept being tested.
+- Only one severity per review. If there are multiple issues, rate by the MOST SIGNIFICANT one.
+- This verdict is parsed by the system. Always include it as the last line.\
+"""
+
+# Static instructions only; student context is a separate system block for prompt caching.
+SYSTEM_PROMPT_STATIC_CACHED = SYSTEM_PROMPT_TEMPLATE.format(student_context="").strip()
+
+
+def build_student_context_block(progress) -> str:
+    """Per-session student context (belt, skills, performance)."""
+    belt_display = progress.belt.capitalize() + " Belt"
+    lines = ["Current student context:", f"- Belt: {belt_display}"]
+
+    if progress.skills_taught:
+        lines.append(f"- Skills learned: {', '.join(progress.skills_taught)}")
+    else:
+        lines.append("- Skills learned: None yet (student hasn't completed any lessons)")
+
+    weak_areas = []
+    for skill, record in progress.lesson_history.items():
+        if record.weak_questions:
+            qs = ", ".join(f"Q{q}" for q in record.weak_questions)
+            weak_areas.append(f"{skill} (quiz: {record.quiz_score}, struggled with {qs})")
+    if weak_areas:
+        lines.append(f"- Weak areas: {'; '.join(weak_areas)}")
+
+    perf_parts = []
+    for skill, record in progress.skills.items():
+        if record.attempts > 0:
+            perf_parts.append(f"{skill} ({record.successes}/{record.attempts} success rate)")
+    if perf_parts:
+        lines.append(f"- Challenge performance: {'; '.join(perf_parts)}")
+
+    lines.append(
+        "- IMPORTANT: Only create challenges using skills the student has already learned. "
+        "Do NOT require knowledge of skills not listed above."
+    )
+
+    return "\n".join(lines)
+
+
+def build_system_blocks(progress) -> list[dict]:
+    """System prompt as cached static block + dynamic student context."""
+    return [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT_STATIC_CACHED,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": build_student_context_block(progress),
+        },
+    ]
+
+
+def build_system_prompt(progress) -> str:
+    """Full system prompt string (for debugging); API uses build_system_blocks."""
+    return f"{SYSTEM_PROMPT_STATIC_CACHED}\n\n{build_student_context_block(progress)}"
+
+
+TOKEN_LIMITS = {
+    "chat": 512,
+    "challenge": 1024,
+    "review": 1024,
+    "lesson": 1536,
+}
+
+# Stream tokens to stdout. Lesson/challenge responses embed parsed metadata blocks; only reviews stream live.
+STREAM_STDOUT_TYPES = frozenset({"review"})
+
+
+def _trim_conversation_history(history: list[dict], max_messages: int) -> None:
+    """Drop oldest user/assistant pairs so history stays bounded (mutates in place)."""
+    if max_messages <= 0:
+        return
+    while len(history) > max_messages:
+        if len(history) >= 2:
+            del history[0:2]
+        else:
+            del history[0]
+
+
+class AIEngine:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int = 1024,
+        system_blocks: list[dict] | None = None,
+    ):
+        self.client = anthropic.Anthropic(api_key=api_key)
+        self.model = model
+        self.max_tokens = max_tokens
+        self.system_blocks: list[dict] = system_blocks or []
+
+    def update_system_from_progress(self, progress):
+        """Refresh dynamic student context; static cached block stays identical."""
+        self.system_blocks = build_system_blocks(progress)
+
+    def update_system_prompt(self, prompt: str):
+        """Legacy: single-string system prompt (disables block caching)."""
+        self.system_blocks = [{"type": "text", "text": prompt}]
+
+    def send_message(
+        self,
+        conversation_history: list[dict],
+        user_message: str,
+        interaction_type: str = "chat",
+    ) -> str:
+        conversation_history.append({"role": "user", "content": user_message})
+        _trim_conversation_history(
+            conversation_history, config.CONVERSATION_MAX_MESSAGES
+        )
+        max_tok = TOKEN_LIMITS.get(interaction_type, self.max_tokens)
+
+        if interaction_type in STREAM_STDOUT_TYPES:
+            assistant_text = self._stream_with_retry(max_tok, conversation_history)
+            print()
+        else:
+            response = self._call_with_retry(max_tok, conversation_history)
+            assistant_text = response.content[0].text
+
+        conversation_history.append({"role": "assistant", "content": assistant_text})
+        return assistant_text
+
+    def _call_with_retry(self, max_tokens: int, messages: list[dict], max_retries: int = 3):
+        """Call the API with retry + exponential backoff for overloaded errors."""
+        for attempt in range(max_retries):
+            try:
+                return self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=self.system_blocks,
+                    messages=messages,
+                )
+            except anthropic.APIStatusError as e:
+                if e.status_code == 529 and attempt < max_retries - 1:
+                    wait = 2**attempt
+                    print(f"\n  Sensei is meditating... retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    raise
+
+    def _stream_with_retry(self, max_tokens: int, messages: list[dict], max_retries: int = 3) -> str:
+        for attempt in range(max_retries):
+            try:
+                parts: list[str] = []
+                print("\nsensei> ", end="", flush=True)
+                with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=self.system_blocks,
+                    messages=messages,
+                ) as stream:
+                    for text in stream.text_stream:
+                        print(text, end="", flush=True)
+                        parts.append(text)
+                return "".join(parts)
+            except anthropic.APIStatusError as e:
+                if e.status_code == 529 and attempt < max_retries - 1:
+                    wait = 2**attempt
+                    print(f"\n  Sensei is meditating... retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    raise
+
+    def send_message_with_context(
+        self,
+        conversation_history: list[dict],
+        user_message: str,
+        code: str,
+        output: str,
+        validation_summary: str = "",
+        interaction_type: str = "review",
+    ) -> str:
+        numbered_lines = [f"{i:3d} | {line}" for i, line in enumerate(code.splitlines(), 1)]
+        numbered_code = "\n".join(numbered_lines)
+
+        compound = (
+            f"{user_message}\n\n"
+            f"---\n"
+            f"**Code submitted** (line numbers shown to the left):\n"
+            f"```python\n{numbered_code}\n```\n\n"
+            f"**Execution output:**\n```\n{output}\n```"
+        )
+
+        if validation_summary:
+            compound += f"\n\n**Concept validation (automated):**\n{validation_summary}"
+
+        return self.send_message(conversation_history, compound, interaction_type=interaction_type)
+
+
+@dataclass
+class VerdictResult:
+    outcome: str
+    severity: str | None
+
+
+SEVERITY_RANK = {"minor": 1, "moderate": 2, "major": 3}
+
+
+def parse_verdict(response: str) -> VerdictResult:
+    """Extract verdict and severity from Sensei's response."""
+    if re.search(r"\[PASS\]", response):
+        return VerdictResult("pass", None)
+    m = re.search(r"\[NEEDS_WORK(?::(\w+))?\]", response)
+    if m:
+        severity = m.group(1) or "moderate"
+        return VerdictResult("needs_work", severity)
+    return VerdictResult("unknown", None)

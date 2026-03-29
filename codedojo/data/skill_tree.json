@@ -1,0 +1,17 @@
+{
+  "belts": {
+    "white": {
+      "name": "White Belt",
+      "skills": [
+        "variables",
+        "types",
+        "operators",
+        "print",
+        "input",
+        "basic_math",
+        "f_strings"
+      ],
+      "description": "Fundamentals of Python: variables, types, basic I/O, arithmetic"
+    }
+  }
+}
