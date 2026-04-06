@@ -1,18 +1,30 @@
 # CodeDojo
 
-CodeDojo is a Python CLI training app that acts like a coding sensei. It teaches focused Python lessons, turns them into practice challenges, runs your `solution.py`, reviews submissions with AI feedback, and tracks progress locally as you move through belt levels.
+CodeDojo is a Python CLI training app built around a PyTorch-powered ML Sensei. It teaches Python, gives you coding drills, reviews your solutions with AI feedback, and trains a local knowledge-tracing model over time so the dojo can adapt to how you actually learn.
 
-## Project Evolution
+## Why This Version Matters
 
 This repository intentionally keeps the same project lineage instead of starting over from scratch.
 
 - The earliest version of CodeDojo in this repo was a desktop-oriented prototype.
 - The next major version rebuilt the project as a Python-first CLI dojo.
-- The current version extends that CLI foundation with belt exams, adaptive knowledge tracing, stronger persistence, richer review flows, and automated tests.
+- This newest version is defined by the addition of a PyTorch knowledge tracer that models learner progress and feeds adaptive guidance back into the Sensei workflow.
 
-That means the git history shows how CodeDojo evolved, while the current working tree reflects the latest training system.
+The git history shows how CodeDojo evolved, and the current working tree reflects the PyTorch ML Sensei version of the project.
 
-## Current Features
+## PyTorch ML Sensei
+
+The key architectural change in this version lives in `codedojo/knowledge_tracer.py`.
+
+- It uses PyTorch to run a small MLP that predicts mastery, learning velocity, and recommended difficulty per skill.
+- It learns from the student's local lesson results, challenge attempts, practice streaks, and review outcomes.
+- It parses `codedojo/data/session_log.jsonl` so the training signal comes from real dojo interactions.
+- It saves its evolving checkpoint locally as `codedojo/data/knowledge_model.pt`.
+- It turns those predictions into qualitative guidance that gets injected into the Sensei system prompt, making future lessons and reviews more adaptive.
+
+In other words, this version is not just "CodeDojo with more commands." It is the version where CodeDojo starts learning about the learner.
+
+## What Users Get
 
 - Guided lessons on foundational Python topics
 - Three-question quizzes after each lesson
@@ -23,15 +35,19 @@ That means the git history shows how CodeDojo evolved, while the current working
 - Concept validation before AI review
 - Review dispute flow when Sensei gets a submission wrong
 - Resume support for interrupted challenges and in-progress exams
-- Local progress, challenge history, session logs, and knowledge-tracing state
-- Pytest coverage for core CLI and progress behavior
+- Local progress, challenge history, session logs, and PyTorch knowledge-tracing state
+- Pytest coverage for core CLI and persistence behavior
 
 ## Requirements
 
 - Python 3.10+
 - An Anthropic API key
 
-## Quick Start
+## Install And Run
+
+1. Clone the repository.
+2. Create and activate a virtual environment.
+3. Install the dependencies, including PyTorch.
 
 ```bash
 python -m venv .venv
@@ -39,23 +55,37 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the repository root. You can use `.env.example` as the starting point:
+If PyTorch needs a platform-specific install command for your machine, use the official PyTorch install selector: [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/).
+
+4. Copy `.env.example` to `.env` and add your Anthropic API key.
 
 ```env
 ANTHROPIC_API_KEY=your-api-key-here
 ```
 
-Then run the dojo:
+5. Start the dojo.
 
 ```bash
 python -m codedojo
 ```
+
+6. Begin with `lesson`, then move into `challenge`, `submit`, and eventually `exam` as your belt progresses.
 
 Run the tests with:
 
 ```bash
 pytest
 ```
+
+## How The Local Training Loop Works
+
+1. You complete lessons and practice challenges.
+2. CodeDojo logs challenge generation, submissions, and dispute outcomes locally.
+3. The PyTorch knowledge tracer extracts features like success rate, streaks, quiz performance, practice recency, and belt level.
+4. The model updates its local understanding of your mastery and momentum.
+5. That assessment is fed back into the Sensei context so the dojo can better tune future interactions.
+
+This means each user can clone the repo, use it on their own machine, and build up their own local training history without needing a shared central learner profile.
 
 ## Basic Commands
 
@@ -102,3 +132,4 @@ tests/
 - Generated learner state under `codedojo/data/` stays local and is not committed.
 - `codedojo/data/skill_tree.json` is committed because it is part of the curriculum definition.
 - The knowledge tracer creates `knowledge_model.pt` locally as you build up session history.
+- Each learner trains their own local Sensei profile from their own activity history.
