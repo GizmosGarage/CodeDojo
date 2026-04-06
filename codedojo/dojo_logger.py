@@ -34,11 +34,20 @@ class DojoLogger:
         self._write("session_end")
         self.flush()
 
-    def log_challenge(self, challenge_id: str, skill: str, requirements: list[str]):
+    def log_challenge(
+        self,
+        challenge_id: str,
+        skill: str,
+        title: str,
+        expected_behavior: str,
+        requirements: list[str],
+    ):
         self._write(
             "challenge_generated",
             challenge_id=challenge_id,
             skill=skill,
+            title=title,
+            expected_behavior=expected_behavior,
             requirements=requirements,
         )
 
@@ -57,6 +66,45 @@ class DojoLogger:
             output=output[:300],
             validation=validation,
             verdict=verdict,
+        )
+
+    def log_dispute(
+        self,
+        challenge_id: str,
+        reasoning: str,
+        verdict: str,
+        overturned: bool,
+    ):
+        self._write(
+            "submission_dispute",
+            challenge_id=challenge_id,
+            reasoning=reasoning[:300],
+            verdict=verdict,
+            overturned=overturned,
+        )
+
+    def log_exam_start(self, exam_id: str, belt: str):
+        self._write("exam_start", exam_id=exam_id, belt=belt)
+
+    def log_exam_challenge_submit(
+        self, exam_id: str, challenge_index: int, challenge_id: str
+    ):
+        self._write(
+            "exam_challenge_submit",
+            exam_id=exam_id,
+            challenge_index=challenge_index,
+            challenge_id=challenge_id,
+        )
+
+    def log_exam_result(
+        self, exam_id: str, verdict: str, belt_before: str, belt_after: str
+    ):
+        self._write(
+            "exam_result",
+            exam_id=exam_id,
+            verdict=verdict,
+            belt_before=belt_before,
+            belt_after=belt_after,
         )
 
     def log_error(self, error_type: str, context: str):

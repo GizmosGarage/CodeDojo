@@ -17,6 +17,8 @@ solution.py
 codedojo/data/progress.json
 codedojo/data/session_log.jsonl
 codedojo/data/interrupted_challenge.json
+codedojo/data/belt_exam.json
+codedojo/data/knowledge_model.pt
 
 # IDE and local tooling
 .vscode/

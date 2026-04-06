@@ -29,30 +29,62 @@ for the workspace, "grasshopper" as an occasional term of endearment.
 {student_context}
 
 When the student asks for a challenge, generate a Python coding challenge appropriate \
-for White Belt. Format clearly with:
-- A title
-- A description of what the program should do
-- Example input/output if applicable
-- Any constraints
+for White Belt. When the student asks for a belt exam, generate a broader promotion exam \
+using only skills they have already learned. The student-facing response MUST use exactly \
+this structure and order:
+Title: [short title]
+
+Brief description: [1-2 sentence setup]
+
+What to do:
+- [short action step]
+- [short action step if needed]
+
+Expected output:
+[show the exact output to aim for, using plain text with line breaks if needed]
+
+Focus:
+- Skill focus: [the main skill being practiced]
+- Sensei is looking for: [the exact functions/constructs the student must use]
+- Make it explicit that matching the output alone is not enough if the required \
+concepts are missing.
 
 Challenge sizing rules:
-- Make it SMALL and FOCUSED. One concept, one clear task.
-- Do NOT combine multiple concepts unless one is a prerequisite of the other.
+- For regular practice challenges, make it SMALL and FOCUSED. One concept, one clear task.
+- Do NOT combine multiple concepts in a regular practice challenge unless one is a prerequisite of the other.
+- For a belt exam, it is okay to combine multiple already-learned skills, but keep it to one self-contained program.
 - Prefer challenges that produce 1-3 lines of output.
 - State requirements crisply — no lengthy preambles or over-explanation.
 - The student should be able to solve it in under 10 minutes.
 IMPORTANT: Prefer challenges that use print() for output rather than input() for user \
 input, since the code runner does not support interactive input yet.
 
+SKILL BOUNDARY RULE (critical — never violate this):
+- The student may ONLY use skills they have already learned (listed in student context).
+- NEVER generate a challenge that requires concepts not yet taught — even implicitly.
+- If the student has NOT learned if/else statements, do NOT create challenges that \
+require different output based on a condition. The output must be fully deterministic \
+from straightforward math and string operations alone.
+- If the student has NOT learned loops, do NOT create challenges that require repetition.
+- If the student has NOT learned lists, do NOT create challenges that require collections.
+- "basic comparisons and boolean logic" means the student can store True/False in \
+variables and print them, but CANNOT branch on them without if/else.
+- Before finalizing any challenge, verify: "Can this be solved using ONLY the skills \
+listed, with no workarounds or concepts beyond them?" If not, redesign it.
+
 CHALLENGE METADATA (mandatory for every challenge):
 At the END of every challenge response, include a JSON block delimited by \
 ```challenge_meta and ```. This block MUST contain:
 - "title": the challenge title (string)
+- "brief_description": short setup/context for the challenge (string)
+- "what_to_do": list of short action steps for the student
+- "expected_output": exact output target as a plain string; use \\n for multiple lines
 - "required_concepts": a list of specific Python functions or constructs the student \
 MUST demonstrate in their solution (e.g. ["round()", "f-string", "string concatenation"]). \
 Be specific — use names like "round()", "int()", "f-string", "string concatenation", \
 "print()", "float()", "//", "%", "**".
 - "expected_behavior": one sentence describing what correct output should look like.
+The Focus section shown to the student must match these required_concepts exactly.
 This metadata is parsed by the system for automated validation. Always include it.
 
 LESSONS AND QUIZZES:
@@ -65,7 +97,7 @@ When asked to teach a lesson, keep it punchy and engaging:
 HOW THE DOJO WORKS (important — tell students this when relevant):
 - The student writes their code in a file called solution.py on their computer.
 - They use CLI commands to interact with the dojo — NOT by pasting code into chat.
-- Key commands: "challenge" (get a challenge), "run" (test their code), "submit" (run code and get your review).
+- Key commands: "challenge" (get a challenge), "exam" (attempt the next belt exam when unlocked), "run" (test their code), "submit" (run code and get your review), "dispute" (challenge a review with reasoning), "skills" (view progress).
 - If a student says they have a solution or asks how to submit, tell them to type "submit" as a command.
 - Never ask students to paste code into the chat.
 
@@ -92,7 +124,18 @@ VERDICT (mandatory for every code review):
   [NEEDS_WORK:moderate] — logical errors, wrong approach for part of the problem, missing edge cases.
   [NEEDS_WORK:major] — fundamental misunderstanding of the core concept being tested.
 - Only one severity per review. If there are multiple issues, rate by the MOST SIGNIFICANT one.
-- This verdict is parsed by the system. Always include it as the last line.\
+- This verdict is parsed by the system. Always include it as the last line.
+
+BELT EXAM GRADING (holistic, after all 3 challenges):
+- Belt exams consist of 3 challenges. You will receive all 3 submissions at once for holistic review.
+- Evaluate the student's overall competency across all 3 challenges — not a simple pass/fail count.
+- Consider: severity of errors, number of errors, importance of errors relative to the skills tested.
+- A student who does well on 2 of 3 with only a minor issue on the third should generally pass.
+- A student with fundamental misunderstandings across multiple challenges should fail.
+- On PASS: deliver a ceremony narrative congratulating the student on earning their next belt. \
+Use martial arts metaphors and make it feel like a real promotion moment.
+- On FAIL: be constructive. Identify 1-3 specific areas to improve. Be encouraging but honest.
+- Use [EXAM_PASS] or [EXAM_FAIL] as the verdict tag (NOT [PASS] or [NEEDS_WORK]).\
 """
 
 # Static instructions only; student context is a separate system block for prompt caching.
@@ -129,12 +172,31 @@ def build_student_context_block(progress) -> str:
         "Do NOT require knowledge of skills not listed above."
     )
 
+    # Explicitly list concepts NOT yet available so the AI avoids them
+    not_available = []
+    taught_set = set(progress.skills_taught)
+    if not any("if" in s.lower() and "else" in s.lower() for s in taught_set):
+        not_available.append("if/else statements (no conditional branching)")
+    if not any("loop" in s.lower() or "for" in s.lower() or "while" in s.lower() for s in taught_set):
+        not_available.append("loops (for/while)")
+    if not any("list" in s.lower() for s in taught_set):
+        not_available.append("lists")
+    if not any("dict" in s.lower() for s in taught_set):
+        not_available.append("dictionaries")
+    if not any("function" in s.lower() and "def" in s.lower() for s in taught_set):
+        not_available.append("function definitions (def)")
+    if not_available:
+        lines.append(
+            "- NOT YET LEARNED (do NOT use these in challenges): "
+            + ", ".join(not_available)
+        )
+
     return "\n".join(lines)
 
 
-def build_system_blocks(progress) -> list[dict]:
-    """System prompt as cached static block + dynamic student context."""
-    return [
+def build_system_blocks(progress, tracer_block: str = "") -> list[dict]:
+    """System prompt as cached static block + dynamic student context + optional tracer."""
+    blocks = [
         {
             "type": "text",
             "text": SYSTEM_PROMPT_STATIC_CACHED,
@@ -145,11 +207,18 @@ def build_system_blocks(progress) -> list[dict]:
             "text": build_student_context_block(progress),
         },
     ]
+    if tracer_block:
+        blocks.append({"type": "text", "text": tracer_block})
+    return blocks
 
 
-def build_system_prompt(progress) -> str:
+def build_system_prompt(progress, tracer_block: str = "") -> str:
     """Full system prompt string (for debugging); API uses build_system_blocks."""
-    return f"{SYSTEM_PROMPT_STATIC_CACHED}\n\n{build_student_context_block(progress)}"
+    parts = [SYSTEM_PROMPT_STATIC_CACHED, build_student_context_block(progress)]
+    if tracer_block:
+        parts.append(tracer_block)
+    return "\n\n".join(parts)
+
 
 
 TOKEN_LIMITS = {
@@ -157,10 +226,11 @@ TOKEN_LIMITS = {
     "challenge": 1024,
     "review": 1024,
     "lesson": 1536,
+    "exam_grading": 2048,
 }
 
 # Stream tokens to stdout. Lesson/challenge responses embed parsed metadata blocks; only reviews stream live.
-STREAM_STDOUT_TYPES = frozenset({"review"})
+STREAM_STDOUT_TYPES = frozenset({"review", "exam_grading"})
 
 
 def _trim_conversation_history(history: list[dict], max_messages: int) -> None:
@@ -187,9 +257,9 @@ class AIEngine:
         self.max_tokens = max_tokens
         self.system_blocks: list[dict] = system_blocks or []
 
-    def update_system_from_progress(self, progress):
+    def update_system_from_progress(self, progress, tracer_block: str = ""):
         """Refresh dynamic student context; static cached block stays identical."""
-        self.system_blocks = build_system_blocks(progress)
+        self.system_blocks = build_system_blocks(progress, tracer_block)
 
     def update_system_prompt(self, prompt: str):
         """Legacy: single-string system prompt (disables block caching)."""
@@ -302,3 +372,15 @@ def parse_verdict(response: str) -> VerdictResult:
         severity = m.group(1) or "moderate"
         return VerdictResult("needs_work", severity)
     return VerdictResult("unknown", None)
+
+
+def parse_exam_verdict(response: str) -> str:
+    """Extract belt exam verdict from Sensei's holistic grading response.
+
+    Returns "pass", "fail", or "unknown".
+    """
+    if re.search(r"\[EXAM_PASS\]", response):
+        return "pass"
+    if re.search(r"\[EXAM_FAIL\]", response):
+        return "fail"
+    return "unknown"

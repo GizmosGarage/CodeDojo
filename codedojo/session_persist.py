@@ -11,12 +11,14 @@ def save_interrupted_challenge(
     attempt_count: int,
     phase: str,
     skill: str | None,
+    challenge_kind: str | None = None,
 ) -> None:
     data = {
         "challenge": asdict(spec),
         "attempt_count": attempt_count,
         "phase": phase,
         "skill": skill,
+        "challenge_kind": challenge_kind or "practice",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -30,6 +32,7 @@ def load_interrupted_challenge(path: Path) -> dict | None:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         data["challenge"] = ChallengeSpec(**data["challenge"])
+        data["challenge_kind"] = data.get("challenge_kind", "practice")
         return data
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
