@@ -325,6 +325,37 @@ class Progress:
         belt_display = self.belt.capitalize() + " Belt"
         return f"Belt: {belt_display} | XP: {self.xp}"
 
+    @classmethod
+    def _group_skill_names_by_belt(cls, names: list[str]) -> list[tuple[str, list[str]]]:
+        """Group known skill names under their curriculum belt headers."""
+        from codedojo.challenge_gen import BELT_SKILL_MAP
+
+        remaining = set(names)
+        groups: list[tuple[str, list[str]]] = []
+
+        for belt in cls.BELT_ORDER:
+            belt_skills = [skill for skill in BELT_SKILL_MAP.get(belt, []) if skill in remaining]
+            if belt_skills:
+                groups.append((f"{belt.capitalize()} Belt", belt_skills))
+                remaining.difference_update(belt_skills)
+
+        extras = [skill for skill in names if skill in remaining]
+        if extras:
+            groups.append(("Other Skills", extras))
+
+        return groups
+
+    def grouped_skills_taught(self) -> list[tuple[str, list[str]]]:
+        """Return learned skills grouped under curriculum belt headers."""
+        return self._group_skill_names_by_belt(list(self.skills_taught))
+
+    def ordered_skills_taught(self) -> list[str]:
+        """Return learned skills flattened in grouped curriculum order."""
+        ordered: list[str] = []
+        for _, skills in self.grouped_skills_taught():
+            ordered.extend(skills)
+        return ordered
+
     def skills_display(self) -> str:
         """Return ASCII progress bars for learned skills (lessons + challenge practice)."""
         names_ordered: list[str] = list(self.skills_taught)
@@ -338,34 +369,32 @@ class Progress:
         lines = ["  === Your Skills ==="]
         max_name = max(len(name) for name in names_ordered)
 
-        def challenge_sort_key(name: str) -> tuple[int, int]:
-            rec = self.skills.get(name) or SkillRecord()
-            return (rec.successes, rec.attempts)
+        grouped_names = self._group_skill_names_by_belt(names_ordered)
 
-        practiced = [n for n in names_ordered if (self.skills.get(n) or SkillRecord()).attempts > 0]
-        lesson_only = [n for n in names_ordered if (self.skills.get(n) or SkillRecord()).attempts == 0]
-        practiced.sort(key=challenge_sort_key, reverse=True)
-        display_order = practiced + lesson_only
+        for belt_label, belt_skills in grouped_names:
+            lines.append("")
+            lines.append(f"  {belt_label}:")
+            for name in belt_skills:
+                record = self.skills.get(name) or SkillRecord()
+                padded_name = name.ljust(max_name)
 
-        for name in display_order:
-            record = self.skills.get(name) or SkillRecord()
-            padded_name = name.ljust(max_name)
+                if record.attempts == 0:
+                    lesson = self.lesson_history.get(name)
+                    quiz = lesson.quiz_score if lesson and lesson.quiz_score else "--"
+                    bar = "-" * 10
+                    lines.append(
+                        f"    {padded_name}  [{bar}] {'Learned':10s} (lesson {quiz} - try 'challenge')"
+                    )
+                    continue
 
-            if record.attempts == 0:
-                lesson = self.lesson_history.get(name)
-                quiz = lesson.quiz_score if lesson and lesson.quiz_score else "--"
-                bar = "-" * 10
+                ratio = record.successes / record.attempts
+                tier = self._challenge_tier(record)
+                filled = round(ratio * 10)
+                bar = "#" * filled + "-" * (10 - filled)
+
                 lines.append(
-                    f"  {padded_name}  [{bar}] {'Learned':10s} (lesson {quiz} - try 'challenge')"
+                    f"    {padded_name}  [{bar}] {tier:10s} ({record.successes}/{record.attempts})"
                 )
-                continue
-
-            ratio = record.successes / record.attempts
-            tier = self._challenge_tier(record)
-            filled = round(ratio * 10)
-            bar = "#" * filled + "-" * (10 - filled)
-
-            lines.append(f"  {padded_name}  [{bar}] {tier:10s} ({record.successes}/{record.attempts})")
 
         return "\n".join(lines)
 

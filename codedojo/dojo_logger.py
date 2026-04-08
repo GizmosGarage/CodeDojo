@@ -58,6 +58,17 @@ class DojoLogger:
         output: str,
         validation: dict | None,
         verdict: str,
+        *,
+        severity: str | None = None,
+        attempt_number: int = 0,
+        forbidden_concepts: list[str] | None = None,
+        timed_out: bool = False,
+        code_lines: int = 0,
+        missing_concepts: list[str] | None = None,
+        understanding: str | None = None,
+        code_quality: str | None = None,
+        struggle_concepts: list[str] | None = None,
+        approach: str | None = None,
     ):
         self._write(
             "submission",
@@ -66,6 +77,16 @@ class DojoLogger:
             output=output[:300],
             validation=validation,
             verdict=verdict,
+            severity=severity,
+            attempt_number=attempt_number,
+            forbidden_concepts=forbidden_concepts or [],
+            timed_out=timed_out,
+            code_lines=code_lines,
+            missing_concepts=missing_concepts or [],
+            understanding=understanding,
+            code_quality=code_quality,
+            struggle_concepts=struggle_concepts or [],
+            approach=approach,
         )
 
     def log_dispute(

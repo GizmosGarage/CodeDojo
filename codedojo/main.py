@@ -6,6 +6,7 @@ from codedojo.ai_engine import (
     STREAM_STDOUT_TYPES,
     build_system_blocks,
     parse_exam_verdict,
+    parse_review_meta,
     parse_verdict,
     SEVERITY_RANK,
 )
@@ -19,17 +20,18 @@ from codedojo.belt_exam import (
 from codedojo.challenge_gen import (
     all_skills_up_to_belt,
     build_exam_final_grading_prompt,
+    find_challenge_boundary_violations,
+    find_lesson_boundary_violations,
     get_belt_exam_prompt,
     get_challenge_prompt,
     get_lesson_prompt,
     NoNewSkillsError,
     parse_challenge_response,
-    parse_quiz_answers,
+    parse_lesson_response,
     skills_for_belt,
-    strip_quiz_meta,
 )
 from codedojo.code_runner import run_code
-from codedojo.code_validator import validate_concepts
+from codedojo.code_validator import detect_forbidden_concepts, validate_concepts
 from codedojo.dojo_logger import DojoLogger
 from codedojo.knowledge_tracer import KnowledgeTracer
 from codedojo.progress import Progress
@@ -73,6 +75,7 @@ HELP_TEXT = """\
   quit       - Exit the dojo"""
 
 CHALLENGE_GENERATION_MAX_ATTEMPTS = 4
+LESSON_GENERATION_MAX_ATTEMPTS = 3
 
 
 def print_sensei(text: str):
@@ -83,7 +86,12 @@ def print_output(result):
     if result.stdout:
         print(f"\n--- Output ---\n{result.stdout.rstrip()}")
     if result.stderr:
-        print(f"\n--- Error ---\n{result.stderr.rstrip()}")
+        if "EOFError" in result.stderr and "input()" in result.stderr:
+            print("\n--- Error ---")
+            print("Your code uses input(), but no test input was provided for this challenge.")
+            print("Try requesting a new challenge — Sensei will now include test input automatically.")
+        else:
+            print(f"\n--- Error ---\n{result.stderr.rstrip()}")
     if result.timed_out:
         print("\n(Code execution timed out)")
     if not result.stdout and not result.stderr and not result.timed_out:
@@ -188,16 +196,54 @@ def handle_lesson(engine: AIEngine, session: Session, logger: DojoLogger, progre
     session.current_skill = skill
     print(f"\nSensei is preparing a lesson on: {skill}...")
     try:
-        response = engine.send_message(
-            session.conversation_history, prompt, interaction_type="lesson"
-        )
-        session.quiz_answers = parse_quiz_answers(response)
-        display_text = strip_quiz_meta(response)
-        session.phase = "quiz"
-        print_sensei(display_text)
-        print("\n  Answer the quiz: quiz [your answers]  (e.g. 'quiz a b c')")
+        history_len = len(session.conversation_history)
+        lesson_prompt = prompt
+
+        for attempt in range(LESSON_GENERATION_MAX_ATTEMPTS):
+            response = engine.send_message(
+                session.conversation_history, lesson_prompt, interaction_type="lesson"
+            )
+            lesson = parse_lesson_response(response, skill)
+            if lesson is not None:
+                violations = find_lesson_boundary_violations(lesson)
+                if violations:
+                    del session.conversation_history[history_len:]
+                    if attempt < LESSON_GENERATION_MAX_ATTEMPTS - 1:
+                        lesson_prompt = (
+                            f"{prompt}\n\n"
+                            "Your last response introduced future lesson topics too early. "
+                            f"Do not mention or use these topics yet: {', '.join(violations)}. "
+                            "Reply again from scratch with ONLY a complete ```lesson_meta block."
+                        )
+                        continue
+                    break
+
+                # Store only the rendered lesson in conversation history; keep answers internal.
+                session.conversation_history[-1]["content"] = lesson.narrative
+                session.quiz_answers = lesson.quiz_answers
+                session.phase = "quiz"
+                print_sensei(lesson.narrative)
+                print("\n  Answer the quiz: quiz [your answers]  (e.g. 'quiz a b c')")
+                return
+
+            del session.conversation_history[history_len:]
+            if attempt < LESSON_GENERATION_MAX_ATTEMPTS - 1:
+                lesson_prompt = (
+                    f"{prompt}\n\n"
+                    "Your last response was malformed for the app. Reply again from scratch "
+                    "with ONLY a complete ```lesson_meta block."
+                )
+
+        logger.log_error("lesson_error", "Sensei returned invalid lesson content.")
+        session.current_skill = None
+        session.quiz_answers = []
+        session.phase = "idle"
+        print("\nSensei dropped the lesson scroll. Please type 'lesson' again.")
     except Exception as e:
         logger.log_error("lesson_error", str(e))
+        session.current_skill = None
+        session.quiz_answers = []
+        session.phase = "idle"
         print(f"\nError communicating with Sensei: {e}")
 
 
@@ -259,10 +305,15 @@ def handle_quiz(
 def show_skill_menu(progress: Progress):
     """Display numbered list of learned skills for challenge selection."""
     print("\n  Choose a skill to practice:")
-    max_name = max(len(skill) for skill in progress.skills_taught)
-    for i, skill in enumerate(progress.skills_taught, 1):
-        label = progress.skill_progress_label(skill)
-        print(f"    {i}. {skill.ljust(max_name)}  {label}")
+    ordered_skills = progress.ordered_skills_taught()
+    max_name = max(len(skill) for skill in ordered_skills)
+    index = 1
+    for belt_label, skills in progress.grouped_skills_taught():
+        print(f"\n  {belt_label}:")
+        for skill in skills:
+            label = progress.skill_progress_label(skill)
+            print(f"    {index}. {skill.ljust(max_name)}  {label}")
+            index += 1
     print("\n  Type a number to select, or 'back' to cancel.")
 
 
@@ -289,16 +340,36 @@ def handle_challenge_generate(
     try:
         recent_challenges = progress.get_recent_challenge_descriptors(skill, limit=5)
         duplicate_warning = None
+        boundary_violations = None
 
         for attempt in range(1, CHALLENGE_GENERATION_MAX_ATTEMPTS + 1):
             prompt, chosen_skill = get_challenge_prompt(
                 skill=skill,
                 recent_challenges=recent_challenges,
                 duplicate_warning=duplicate_warning,
+                boundary_violations=boundary_violations,
             )
             temp_history = list(session.conversation_history)
             response = engine.send_message(temp_history, prompt, interaction_type="challenge")
             spec = parse_challenge_response(response, chosen_skill)
+
+            # Check for skill boundary violations
+            violations = find_challenge_boundary_violations(spec, progress.skills_taught)
+            if violations:
+                boundary_violations = violations
+                if attempt < CHALLENGE_GENERATION_MAX_ATTEMPTS:
+                    print("  Challenge referenced untaught concepts. Requesting a cleaner one...")
+                    continue
+
+                logger.log_error(
+                    "challenge_boundary_error",
+                    f"skill={skill}; violations={violations}",
+                )
+                print(
+                    "\n  Sensei kept referencing concepts you haven't learned. "
+                    "Try 'challenge' again or choose another skill."
+                )
+                return
 
             similar = progress.find_similar_challenge(
                 skill=spec.skill,
@@ -387,6 +458,7 @@ def _generate_next_exam_challenge(
 
     recent_challenges = progress.get_recent_challenge_descriptors(exam_label, limit=3)
     duplicate_warning = None
+    boundary_violations = None
 
     for attempt in range(1, CHALLENGE_GENERATION_MAX_ATTEMPTS + 1):
         prompt, chosen_skill = get_belt_exam_prompt(
@@ -397,10 +469,29 @@ def _generate_next_exam_challenge(
             prior_exam_challenges=prior_exam_challenges,
             recent_challenges=recent_challenges,
             duplicate_warning=duplicate_warning,
+            boundary_violations=boundary_violations,
         )
         temp_history = list(session.conversation_history)
         response = engine.send_message(temp_history, prompt, interaction_type="challenge")
         spec = parse_challenge_response(response, chosen_skill)
+
+        # Check for skill boundary violations
+        violations = find_challenge_boundary_violations(spec, progress.skills_taught)
+        if violations:
+            boundary_violations = violations
+            if attempt < CHALLENGE_GENERATION_MAX_ATTEMPTS:
+                print("  Exam challenge referenced untaught concepts. Requesting a cleaner one...")
+                continue
+
+            logger.log_error(
+                "exam_boundary_error",
+                f"belt={progress.belt}; violations={violations}",
+            )
+            print(
+                "\n  Sensei kept referencing concepts you haven't learned. "
+                "Try 'exam' again later."
+            )
+            return False
 
         similar = progress.find_similar_challenge(
             skill=spec.skill,
@@ -662,18 +753,23 @@ def handle_exam_final_grading(
         print("  Your exam progress is saved. Type 'exam' to retry grading.")
 
 
-def handle_run():
+def handle_run(session: Session):
     path = config.SOLUTION_FILE
     if not path.exists():
         print(f"\nNo solution file found at: {path}")
         print("Write your code there first, then try again.")
         return
-    result = run_code(path, timeout=config.TIMEOUT_SECONDS)
+    stdin_input = None
+    if session.current_challenge and session.current_challenge.test_input:
+        stdin_input = session.current_challenge.test_input
+        if not stdin_input.endswith("\n"):
+            stdin_input += "\n"
+    result = run_code(path, timeout=config.TIMEOUT_SECONDS, stdin_input=stdin_input)
     print_output(result)
 
 
-def _read_and_run_solution() -> tuple[str, str, str, dict | None] | None:
-    """Read solution.py, run it, and return (code, output, validation_summary, validation_dict).
+def _read_and_run_solution(session: Session) -> tuple[str, str, bool] | None:
+    """Read solution.py, run it, and return (code, output_text, timed_out).
 
     Returns None if the file doesn't exist.
     """
@@ -683,8 +779,14 @@ def _read_and_run_solution() -> tuple[str, str, str, dict | None] | None:
         print("Write your code there first, then try again.")
         return None
 
+    stdin_input = None
+    if session.current_challenge and session.current_challenge.test_input:
+        stdin_input = session.current_challenge.test_input
+        if not stdin_input.endswith("\n"):
+            stdin_input += "\n"
+
     code = path.read_text(encoding="utf-8")
-    result = run_code(path, timeout=config.TIMEOUT_SECONDS)
+    result = run_code(path, timeout=config.TIMEOUT_SECONDS, stdin_input=stdin_input)
 
     output_text = ""
     if result.stdout:
@@ -696,7 +798,7 @@ def _read_and_run_solution() -> tuple[str, str, str, dict | None] | None:
     if not output_text:
         output_text = "(no output)"
 
-    return code, output_text
+    return code, output_text, result.timed_out
 
 
 def handle_submit(
@@ -708,16 +810,17 @@ def handle_submit(
         _handle_exam_submit(engine, session, logger, progress, tracer)
         return
 
-    result = _read_and_run_solution()
+    result = _read_and_run_solution(session)
     if result is None:
         return
-    code, output_text = result
+    code, output_text, timed_out = result
 
     clear_review_state(session)
 
     # Run concept validation if we have structured challenge data
     validation_summary = ""
     validation_dict = None
+    val_result = None
     if session.current_challenge and session.current_challenge.required_concepts:
         val_result = validate_concepts(code, session.current_challenge.required_concepts)
         validation_summary = val_result.summary()
@@ -727,6 +830,14 @@ def handle_submit(
             "missing": val_result.missing,
             "unknown": val_result.unknown,
         }
+
+    # Advisory: detect concepts the student hasn't been taught yet
+    forbidden_summary = ""
+    forbidden_result = detect_forbidden_concepts(code, progress.skills_taught)
+    if forbidden_result.found_forbidden:
+        forbidden_summary = forbidden_result.summary()
+        print(f"\n  [Advisory] {forbidden_summary}")
+        print("  Sensei will take this into account during review.")
 
     print("\nSending to Sensei for review...")
     try:
@@ -739,10 +850,12 @@ def handle_submit(
             code,
             output_text,
             validation_summary=validation_summary,
+            forbidden_summary=forbidden_summary,
         )
 
-        # Parse verdict and update progress
+        # Parse verdict and review metadata
         verdict = parse_verdict(response)
+        review_meta = parse_review_meta(response)
         challenge_id = session.current_challenge.challenge_id if session.current_challenge else "none"
         skill = session.current_challenge.skill if session.current_challenge else "unknown"
         session.attempt_count += 1
@@ -753,7 +866,19 @@ def handle_submit(
                 progress.record_attempt(skill, challenge_id, passed)
 
                 if tracer:
-                    tracer.train_step(skill, passed, progress)
+                    tracer.train_step(
+                        skill, passed, progress,
+                        severity=verdict.severity,
+                        attempt_number=session.attempt_count,
+                        missing_concepts=val_result.missing if val_result else [],
+                        forbidden_concepts=forbidden_result.found_forbidden,
+                        timed_out=timed_out,
+                        code_lines=len(code.splitlines()),
+                        understanding=review_meta.understanding,
+                        code_quality=review_meta.code_quality,
+                        struggle_concepts=review_meta.struggle_concepts,
+                        approach=review_meta.approach,
+                    )
 
                 # Track worst severity across attempts for this challenge
                 if verdict.severity:
@@ -776,6 +901,16 @@ def handle_submit(
             output=output_text,
             validation=validation_dict,
             verdict=verdict.outcome,
+            severity=verdict.severity,
+            attempt_number=session.attempt_count,
+            forbidden_concepts=forbidden_result.found_forbidden,
+            timed_out=timed_out,
+            code_lines=len(code.splitlines()),
+            missing_concepts=val_result.missing if val_result else [],
+            understanding=review_meta.understanding,
+            code_quality=review_meta.code_quality,
+            struggle_concepts=review_meta.struggle_concepts,
+            approach=review_meta.approach,
         )
         if "review" not in STREAM_STDOUT_TYPES:
             print_sensei(response)
@@ -816,10 +951,10 @@ def _handle_exam_submit(
 ):
     """Handle a submit during a belt exam — store result, no Sensei review."""
     exam_state = session.belt_exam_state
-    result = _read_and_run_solution()
+    result = _read_and_run_solution(session)
     if result is None:
         return
-    code, output_text = result
+    code, output_text, timed_out = result
 
     current_rec = exam_state.current_challenge
     if not current_rec:
@@ -839,6 +974,16 @@ def _handle_exam_submit(
             "missing": val_result.missing,
             "unknown": val_result.unknown,
         }
+
+    # Advisory: detect concepts the student hasn't been taught yet
+    forbidden_result = detect_forbidden_concepts(code, progress.skills_taught)
+    if forbidden_result.found_forbidden:
+        forbidden_summary = forbidden_result.summary()
+        print(f"\n  [Advisory] {forbidden_summary}")
+        if validation_summary:
+            validation_summary += f"\n{forbidden_summary}"
+        else:
+            validation_summary = forbidden_summary
 
     # Store submission in exam state
     current_rec.code = code
@@ -929,7 +1074,12 @@ def handle_dispute(
                 progress.record_attempt(review.skill, review.challenge_id, True)
 
                 if tracer:
-                    tracer.train_step(review.skill, True, progress)
+                    tracer.train_step(
+                        review.skill, True, progress,
+                        severity=None,
+                        attempt_number=session.attempt_count,
+                        understanding="full",
+                    )
 
                 if session.worst_severity in ("minor", None):
                     progress.add_xp(10)
@@ -1014,9 +1164,10 @@ def main():
                     print("  Cancelled.")
                     continue
                 try:
+                    selectable_skills = progress.ordered_skills_taught()
                     idx = int(command) - 1
-                    if 0 <= idx < len(progress.skills_taught):
-                        chosen_skill = progress.skills_taught[idx]
+                    if 0 <= idx < len(selectable_skills):
+                        chosen_skill = selectable_skills[idx]
                         session.phase = "idle"
                         handle_challenge_generate(
                             engine,
@@ -1026,7 +1177,7 @@ def main():
                             skill=chosen_skill,
                         )
                     else:
-                        print(f"  Pick a number between 1 and {len(progress.skills_taught)}, or 'back'.")
+                        print(f"  Pick a number between 1 and {len(selectable_skills)}, or 'back'.")
                 except ValueError:
                     print("  Pick a number from the list, or type 'back' to cancel.")
                 continue
@@ -1155,7 +1306,7 @@ def main():
                     answers = command.split()[1:]
                     handle_quiz(engine, session, logger, progress, answers, tracer)
             elif command == "run":
-                handle_run()
+                handle_run(session)
             elif command == "submit":
                 handle_submit(engine, session, logger, progress, tracer)
             elif command in ("dispute", "rebuke"):

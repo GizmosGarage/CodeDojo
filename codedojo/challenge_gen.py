@@ -4,10 +4,10 @@ import re
 import uuid
 
 from codedojo.challenge_model import ChallengeSpec
+from codedojo.lesson_model import LessonPoint, LessonSpec, QuizQuestion
 
-_QUIZ_ANSWERS_PATTERN = re.compile(r"```quiz_answers\s*\n?(.*?)\n?\s*```", re.DOTALL)
-_STRIP_QUIZ_META_PATTERN = re.compile(r"```quiz_answers\s*\n?.*?\n?\s*```", re.DOTALL)
 _CHALLENGE_META_PATTERN = re.compile(r"```challenge_meta\s*\n?(.*?)\n?\s*```", re.DOTALL)
+_LESSON_META_PATTERN = re.compile(r"```lesson_meta\s*\n?(.*?)\n?\s*```", re.DOTALL)
 
 
 class NoNewSkillsError(Exception):
@@ -39,6 +39,42 @@ BELT_SKILL_MAP = {
     "yellow": YELLOW_BELT_SKILLS,
 }
 
+LESSON_FUTURE_SKILL_PATTERNS = {
+    "if/else conditional statements": [
+        re.compile(r"(?m)^\s*if\s+.+:\s*$", re.IGNORECASE),
+        re.compile(r"(?m)^\s*else\s*:\s*$", re.IGNORECASE),
+        re.compile(r"\bif/else\b", re.IGNORECASE),
+        re.compile(r"\bif statement(?:s)?\b", re.IGNORECASE),
+    ],
+    "elif chains": [
+        re.compile(r"\belif\b", re.IGNORECASE),
+    ],
+    "input() and type conversion": [
+        re.compile(r"\binput\s*\(", re.IGNORECASE),
+        re.compile(r"\bint\s*\(", re.IGNORECASE),
+        re.compile(r"\bfloat\s*\(", re.IGNORECASE),
+        re.compile(r"\bstr\s*\(", re.IGNORECASE),
+        re.compile(r"\btype conversion\b", re.IGNORECASE),
+    ],
+    "while loops": [
+        re.compile(r"\bwhile\b", re.IGNORECASE),
+    ],
+    "for loops and range()": [
+        re.compile(r"\brange\s*\(", re.IGNORECASE),
+        re.compile(r"(?m)^\s*for\s+\w+\s+in\b", re.IGNORECASE),
+        re.compile(r"\bfor loop(?:s)?\b", re.IGNORECASE),
+    ],
+    "basic string methods (.upper(), .lower(), .strip(), .replace())": [
+        re.compile(r"\.upper\s*\(", re.IGNORECASE),
+        re.compile(r"\.lower\s*\(", re.IGNORECASE),
+        re.compile(r"\.strip\s*\(", re.IGNORECASE),
+        re.compile(r"\.replace\s*\(", re.IGNORECASE),
+    ],
+    "len() function": [
+        re.compile(r"\blen\s*\(", re.IGNORECASE),
+    ],
+}
+
 
 def skills_for_belt(belt: str) -> list[str]:
     """Return the skill list for the given belt color."""
@@ -55,6 +91,26 @@ def all_skills_up_to_belt(belt: str) -> list[str]:
         if b == belt:
             break
     return result
+
+
+def all_curriculum_skills() -> list[str]:
+    """Return all known curriculum skills in teaching order."""
+    from codedojo.progress import Progress
+
+    ordered: list[str] = []
+    for belt in Progress.BELT_ORDER:
+        ordered.extend(BELT_SKILL_MAP.get(belt, []))
+    return ordered
+
+
+def future_lesson_skills(skill: str) -> list[str]:
+    """Return skills that should be taught after the given lesson."""
+    ordered = all_curriculum_skills()
+    try:
+        index = ordered.index(skill)
+    except ValueError:
+        return []
+    return ordered[index + 1:]
 
 
 def _clean_text(value: object) -> str:
@@ -120,6 +176,57 @@ def format_challenge_narrative(
     return "\n".join(lines).rstrip()
 
 
+def format_lesson_narrative(
+    *,
+    title: str,
+    summary: str,
+    points: list[LessonPoint],
+    quiz: list[QuizQuestion],
+) -> str:
+    """Render the student-facing lesson in a fixed format."""
+    lines = [
+        f"Lesson: {title}",
+        "",
+        "Summary:",
+        summary,
+        "",
+        "Key points:",
+    ]
+
+    for index, point in enumerate(points, 1):
+        lines.append(f"{index}. {point.title}")
+        lines.append(point.explanation)
+        if point.example:
+            lines.extend(
+                [
+                    "Example:",
+                    "```python",
+                    point.example,
+                    "```",
+                ]
+            )
+        lines.append("")
+
+    lines.append("QUIZ:")
+    for index, question in enumerate(quiz, 1):
+        lines.append(f"{index}. {question.question}")
+        if question.code:
+            lines.extend(
+                [
+                    "```python",
+                    question.code,
+                    "```",
+                ]
+            )
+        option_labels = ("A", "B", "C")
+        for label, option in zip(option_labels, question.options):
+            lines.append(f"{label}) {option}")
+        if index != len(quiz):
+            lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
 def get_lesson_prompt(
     skill: str | None = None,
     available_skills: list[str] | None = None,
@@ -130,46 +237,186 @@ def get_lesson_prompt(
     elif available_skills is not None:
         if not available_skills:
             raise NoNewSkillsError("All skills in this belt have been taught.")
-        chosen = random.choice(available_skills)
+        # Lessons should follow the curriculum order, not jump around randomly.
+        chosen = available_skills[0]
     else:
-        chosen = random.choice(WHITE_BELT_SKILLS)
+        chosen = WHITE_BELT_SKILLS[0]
+    future_topics = future_lesson_skills(chosen)
+    future_topics_text = ""
+    if future_topics:
+        future_topics_text = (
+            "Do NOT teach, mention, or use any later curriculum topics in this lesson yet. "
+            "That includes explanations, examples, and quiz questions.\n"
+            f"Future topics to avoid for now: {', '.join(future_topics)}.\n\n"
+        )
     prompt = (
-        f"Sensei, please teach me a quick lesson about: {chosen}\n\n"
-        "Keep it brief and focused - 3-5 key points maximum. "
-        "Use a short concrete example for each point. "
-        "At the end, include a multiple-choice quiz with exactly 3 questions "
-        "to check understanding.\n\n"
-        "Format the quiz as:\n\n"
-        "QUIZ:\n"
-        "1. [Question]\n"
-        "   a) [option]\n   b) [option]\n   c) [option]\n\n"
-        "2. [Question]\n"
-        "   a) [option]\n   b) [option]\n   c) [option]\n\n"
-        "3. [Question]\n"
-        "   a) [option]\n   b) [option]\n   c) [option]\n\n"
-        "After the quiz questions, include a JSON block delimited by "
-        "```quiz_answers and ``` containing:\n"
-        '- "answers": list of correct letters, e.g. ["b", "a", "c"]\n'
-        "Place this block at the very end of your response."
+        f"Sensei, please prepare the student's next lesson about: {chosen}\n\n"
+        "Curriculum selection and prerequisite checks have already been handled by the app. "
+        "This topic is the correct next lesson for the student right now.\n\n"
+        "Teach exactly this skill. Do not question whether the student is ready, "
+        "do not mention missing prerequisites or belt progression, and do not redirect "
+        "them to a different topic or a challenge instead.\n\n"
+        f"{future_topics_text}"
+        "Reply with ONLY a JSON metadata block delimited by ```lesson_meta and ```. "
+        "Do not include any prose before or after the block.\n\n"
+        "The block must contain:\n"
+        '- "title": short lesson title\n'
+        '- "summary": 1-2 sentence overview of the skill\n'
+        '- "points": list of 3 to 5 objects, each with:\n'
+        '  - "title": short point heading\n'
+        '  - "explanation": 1-2 short teaching sentences\n'
+        '  - "example": short Python example as a plain string; use \\n for multiple lines\n'
+        '- "quiz": list of exactly 3 objects, each with:\n'
+        '  - "question": question text\n'
+        '  - "code": short Python snippet as a plain string; use \\n for multiple lines; use "" if none\n'
+        '  - "options": list of exactly 3 answer options in A/B/C order\n'
+        '  - "answer": the correct letter as "a", "b", or "c"\n\n'
+        "Keep the lesson tight and practical. Every point should teach one idea and show it with code. "
+        "Quiz answers are hidden for the app, so do not reveal them anywhere except the answer fields."
     )
     return prompt, chosen
 
 
-def parse_quiz_answers(response: str) -> list[str]:
-    """Extract correct quiz answers from the quiz_answers JSON block."""
-    match = _QUIZ_ANSWERS_PATTERN.search(response)
-    if match:
-        try:
-            meta = json.loads(match.group(1).strip())
-            return meta.get("answers", [])
-        except json.JSONDecodeError:
-            pass
-    return []
+def _lesson_text_for_boundary_checks(lesson: LessonSpec) -> str:
+    parts = [lesson.title, lesson.summary]
+    for point in lesson.points:
+        parts.extend([point.title, point.explanation, point.example])
+    for question in lesson.quiz:
+        parts.extend([question.question, question.code, *question.options])
+    return "\n".join(part for part in parts if part)
 
 
-def strip_quiz_meta(response: str) -> str:
-    """Remove the quiz_answers JSON block from display text."""
-    return _STRIP_QUIZ_META_PATTERN.sub("", response).rstrip()
+def find_lesson_boundary_violations(lesson: LessonSpec) -> list[str]:
+    """Return future curriculum topics that leaked into this lesson."""
+    text = _lesson_text_for_boundary_checks(lesson)
+    violations: list[str] = []
+
+    for future_skill in future_lesson_skills(lesson.skill):
+        patterns = LESSON_FUTURE_SKILL_PATTERNS.get(future_skill, [])
+        if any(pattern.search(text) for pattern in patterns):
+            violations.append(future_skill)
+
+    return violations
+
+
+def _challenge_text_for_boundary_checks(challenge: ChallengeSpec) -> str:
+    """Concatenate all challenge text fields for boundary scanning."""
+    parts = [
+        challenge.title,
+        challenge.brief_description,
+        "\n".join(challenge.what_to_do),
+        challenge.expected_output,
+        challenge.narrative,
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def find_challenge_boundary_violations(
+    challenge: ChallengeSpec,
+    taught_skills: list[str],
+) -> list[str]:
+    """Return untaught skills whose patterns appear in the challenge text."""
+    text = _challenge_text_for_boundary_checks(challenge)
+    all_skills = all_curriculum_skills()
+    taught_set = set(taught_skills)
+    untaught = [s for s in all_skills if s not in taught_set]
+
+    violations: list[str] = []
+    for skill in untaught:
+        patterns = LESSON_FUTURE_SKILL_PATTERNS.get(skill, [])
+        if any(p.search(text) for p in patterns):
+            violations.append(skill)
+    return violations
+
+
+def _coerce_lesson_points(value: object) -> list[LessonPoint]:
+    if not isinstance(value, list):
+        return []
+
+    points: list[LessonPoint] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return []
+        title = _clean_text(item.get("title"))
+        explanation = _clean_text(item.get("explanation"))
+        example = _clean_text(item.get("example"))
+        if not title or not explanation or not example:
+            return []
+        points.append(LessonPoint(title=title, explanation=explanation, example=example))
+    return points
+
+
+def _coerce_quiz_options(value: object) -> list[str]:
+    if isinstance(value, list):
+        options = [_clean_text(option) for option in value]
+    elif isinstance(value, dict):
+        options = [_clean_text(value.get(letter)) for letter in ("a", "b", "c")]
+    else:
+        return []
+
+    if len(options) != 3 or any(not option for option in options):
+        return []
+    return options
+
+
+def _coerce_quiz_questions(value: object) -> list[QuizQuestion]:
+    if not isinstance(value, list):
+        return []
+
+    quiz: list[QuizQuestion] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return []
+        question = _clean_text(item.get("question"))
+        code = _clean_text(item.get("code"))
+        options = _coerce_quiz_options(item.get("options"))
+        answer = _clean_text(item.get("answer")).lower()
+        if not question or len(options) != 3 or answer not in {"a", "b", "c"}:
+            return []
+        quiz.append(
+            QuizQuestion(
+                question=question,
+                code=code,
+                options=options,
+                answer=answer,
+            )
+        )
+    return quiz
+
+
+def parse_lesson_response(raw_response: str, skill: str) -> LessonSpec | None:
+    """Extract structured lesson metadata and render student-facing lesson text."""
+    match = _LESSON_META_PATTERN.search(raw_response)
+    if not match:
+        return None
+
+    try:
+        meta = json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        return None
+
+    title = _clean_text(meta.get("title")) or skill
+    summary = _clean_text(meta.get("summary"))
+    points = _coerce_lesson_points(meta.get("points"))
+    quiz = _coerce_quiz_questions(meta.get("quiz"))
+
+    if not summary or not 3 <= len(points) <= 5 or len(quiz) != 3:
+        return None
+
+    narrative = format_lesson_narrative(
+        title=title,
+        summary=summary,
+        points=points,
+        quiz=quiz,
+    )
+    return LessonSpec(
+        skill=skill,
+        title=title,
+        summary=summary,
+        points=points,
+        quiz=quiz,
+        narrative=narrative,
+    )
 
 
 def _format_prior_challenge(challenge: dict) -> str | None:
@@ -194,6 +441,7 @@ def get_challenge_prompt(
     skill: str | None = None,
     recent_challenges: list[dict] | None = None,
     duplicate_warning: dict | None = None,
+    boundary_violations: list[str] | None = None,
 ) -> tuple[str, str]:
     """Return (prompt_for_sensei, chosen_skill)."""
     chosen = skill if skill else random.choice(WHITE_BELT_SKILLS)
@@ -222,6 +470,14 @@ def get_challenge_prompt(
             history_lines.append("Your last attempt was still too similar to this prior challenge:")
             history_lines.append(formatted_duplicate)
             history_lines.append("Try again with a clearly different idea.")
+
+    if boundary_violations:
+        history_lines.append(
+            "Your last attempt referenced concepts the student has NOT learned yet. "
+            "Do NOT mention or require these topics: "
+            + ", ".join(boundary_violations)
+            + ". Generate a completely new challenge using ONLY skills the student knows."
+        )
 
     if len(history_lines) > 2:
         history_section = "\n" + "\n".join(history_lines) + "\n\n"
@@ -252,6 +508,8 @@ def get_challenge_prompt(
         '- "brief_description": short setup/context for the challenge\n'
         '- "what_to_do": list of short student action steps\n'
         '- "expected_output": exact output target as a plain string; use \\n for multiple lines\n'
+        '- "test_input": if the challenge uses input(), provide the stdin values (one per line) '
+        'that produce the expected_output. Omit or leave empty if no input() is needed.\n'
         '- "required_concepts": list of specific Python functions or constructs '
         'the student must use (e.g. ["round()", "f-string", "float()"])\n'
         '- "expected_behavior": one sentence describing what correct output looks like\n\n'
@@ -270,6 +528,7 @@ def get_belt_exam_prompt(
     prior_exam_challenges: list[dict] | None = None,
     recent_challenges: list[dict] | None = None,
     duplicate_warning: dict | None = None,
+    boundary_violations: list[str] | None = None,
 ) -> tuple[str, str]:
     """Return (prompt_for_sensei, exam_label) for a user-started belt exam."""
     exam_label = f"{belt_name} Exam"
@@ -308,6 +567,14 @@ def get_belt_exam_prompt(
             history_lines.append(formatted_duplicate)
             history_lines.append("Try again with a clearly different exam idea.")
 
+    if boundary_violations:
+        history_lines.append(
+            "Your last attempt referenced concepts the student has NOT learned yet. "
+            "Do NOT mention or require these topics: "
+            + ", ".join(boundary_violations)
+            + ". Generate a completely new challenge using ONLY skills the student knows."
+        )
+
     if len(history_lines) > 2:
         history_section = "\n" + "\n".join(history_lines) + "\n\n"
 
@@ -343,6 +610,8 @@ def get_belt_exam_prompt(
         '- "brief_description": short setup/context for the challenge\n'
         '- "what_to_do": list of short student action steps\n'
         '- "expected_output": exact output target as a plain string; use \\n for multiple lines\n'
+        '- "test_input": if the challenge uses input(), provide the stdin values (one per line) '
+        'that produce the expected_output. Omit or leave empty if no input() is needed.\n'
         '- "required_concepts": list of specific Python functions or constructs '
         'the student must use (e.g. ["round()", "f-string", "float()"])\n'
         '- "expected_behavior": one sentence describing what correct output looks like\n\n'
@@ -433,6 +702,7 @@ def parse_challenge_response(raw_response: str, skill: str) -> ChallengeSpec:
             brief_description = _clean_text(meta.get("brief_description"))
             what_to_do = _coerce_string_list(meta.get("what_to_do"))
             expected_output = _clean_text(meta.get("expected_output"))
+            test_input = _clean_text(meta.get("test_input"))
             narrative = format_challenge_narrative(
                 skill=skill,
                 title=title,
@@ -451,6 +721,7 @@ def parse_challenge_response(raw_response: str, skill: str) -> ChallengeSpec:
                 brief_description=brief_description,
                 what_to_do=what_to_do,
                 expected_output=expected_output,
+                test_input=test_input or "",
                 narrative=narrative,
             )
         except (json.JSONDecodeError, AttributeError):

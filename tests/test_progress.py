@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 import json
 
-from codedojo.challenge_gen import WHITE_BELT_SKILLS
-from codedojo.progress import Progress
+from codedojo.challenge_gen import WHITE_BELT_SKILLS, YELLOW_BELT_SKILLS
+from codedojo.progress import Progress, SkillRecord
 
 
 def test_skill_progress_label_uses_compact_challenge_counts():
@@ -159,3 +159,49 @@ def test_save_and_load_preserve_belt_exam_attempts(tmp_path):
     loaded.load(path)
 
     assert loaded.belt_exam_attempts_today(now=test_now) == 1
+
+
+def test_skills_display_groups_skills_under_belt_headers():
+    progress = Progress()
+    progress.record_lesson(WHITE_BELT_SKILLS[0], 3, 3, [])
+    progress.record_attempt(WHITE_BELT_SKILLS[0], "white123", passed=True)
+    progress.record_lesson(YELLOW_BELT_SKILLS[0], 2, 3, [2])
+
+    output = progress.skills_display()
+
+    white_header = output.index("  White Belt:")
+    yellow_header = output.index("  Yellow Belt:")
+    white_skill = output.index(WHITE_BELT_SKILLS[0])
+    yellow_skill = output.index(YELLOW_BELT_SKILLS[0])
+
+    assert white_header < white_skill < yellow_header < yellow_skill
+    assert "Mastered" in output
+    assert "(lesson 2/3 - try 'challenge')" in output
+
+
+def test_skills_display_puts_unmapped_skills_under_other_skills():
+    progress = Progress()
+    progress.skills["mystery dojo technique"] = SkillRecord(attempts=1, successes=0)
+
+    output = progress.skills_display()
+
+    other_header = output.index("  Other Skills:")
+    other_skill = output.index("mystery dojo technique")
+
+    assert other_header < other_skill
+    assert "Learning" in output
+
+
+def test_ordered_skills_taught_follows_grouped_belt_order():
+    progress = Progress()
+    progress.skills_taught = [
+        YELLOW_BELT_SKILLS[0],
+        WHITE_BELT_SKILLS[0],
+        WHITE_BELT_SKILLS[1],
+    ]
+
+    assert progress.ordered_skills_taught() == [
+        WHITE_BELT_SKILLS[0],
+        WHITE_BELT_SKILLS[1],
+        YELLOW_BELT_SKILLS[0],
+    ]

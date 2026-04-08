@@ -1,6 +1,7 @@
+import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anthropic
 
@@ -56,8 +57,9 @@ Challenge sizing rules:
 - Prefer challenges that produce 1-3 lines of output.
 - State requirements crisply — no lengthy preambles or over-explanation.
 - The student should be able to solve it in under 10 minutes.
-IMPORTANT: Prefer challenges that use print() for output rather than input() for user \
-input, since the code runner does not support interactive input yet.
+When a challenge uses input(), you MUST provide test_input (one value per line) that \
+the code runner will feed as stdin. The expected_output should match what the program \
+prints when given that test_input.
 
 SKILL BOUNDARY RULE (critical — never violate this):
 - The student may ONLY use skills they have already learned (listed in student context).
@@ -89,10 +91,15 @@ This metadata is parsed by the system for automated validation. Always include i
 
 LESSONS AND QUIZZES:
 When asked to teach a lesson, keep it punchy and engaging:
-- 3-5 key points, each with a short concrete code example.
-- No filler. If a point can be shown with code, show it — don't explain around it.
-- End with a 3-question multiple-choice quiz to check understanding.
-- Include a quiz_answers JSON block at the very end (the system parses this).
+- The app has already chosen the correct next lesson topic and handled progression rules.
+- Teach the requested lesson directly. Do NOT debate prerequisites, belt order, or readiness.
+- Do NOT redirect a lesson request into a challenge suggestion.
+- The app renders lesson text for the student, so reply with ONLY a ```lesson_meta JSON block.
+- Do NOT include any prose before or after the metadata block.
+- Each lesson may introduce ONLY the requested skill. Do not teach syntax or concepts from later lessons.
+- Include a short summary, 3-5 teaching points, and exactly 3 quiz questions.
+- Each teaching point must include a short concrete Python example.
+- Quiz answers are hidden for the app. Do NOT reveal them anywhere except the metadata answer fields.
 
 HOW THE DOJO WORKS (important — tell students this when relevant):
 - The student writes their code in a file called solution.py on their computer.
@@ -125,6 +132,21 @@ VERDICT (mandatory for every code review):
   [NEEDS_WORK:major] — fundamental misunderstanding of the core concept being tested.
 - Only one severity per review. If there are multiple issues, rate by the MOST SIGNIFICANT one.
 - This verdict is parsed by the system. Always include it as the last line.
+
+REVIEW METADATA (mandatory for every code review):
+After the verdict line, include a JSON block delimited by ```review_meta and ```:
+{{
+  "understanding": "none" | "partial" | "full",
+  "code_quality": "poor" | "adequate" | "good",
+  "struggle_concepts": [],
+  "approach": "standard" | "creative"
+}}
+- "understanding": How well does the student grasp the CORE concept being tested? \
+"none" = fundamental misunderstanding, "partial" = right idea but gaps, "full" = solid grasp.
+- "code_quality": Overall code organization and style (separate from correctness).
+- "struggle_concepts": List specific concepts the student struggled with. Empty list if none.
+- "approach": "creative" only if the student used a notably original solution method.
+This metadata is parsed by the system — always include it after every review verdict.
 
 BELT EXAM GRADING (holistic, after all 3 challenges):
 - Belt exams consist of 3 challenges. You will receive all 3 submissions at once for holistic review.
@@ -168,8 +190,8 @@ def build_student_context_block(progress) -> str:
         lines.append(f"- Challenge performance: {'; '.join(perf_parts)}")
 
     lines.append(
-        "- IMPORTANT: Only create challenges using skills the student has already learned. "
-        "Do NOT require knowledge of skills not listed above."
+        "- IMPORTANT: Challenges and exams may only use skills the student has already learned. "
+        "Lessons may introduce exactly one new skill chosen by the app."
     )
 
     # Explicitly list concepts NOT yet available so the AI avoids them
@@ -187,7 +209,7 @@ def build_student_context_block(progress) -> str:
         not_available.append("function definitions (def)")
     if not_available:
         lines.append(
-            "- NOT YET LEARNED (do NOT use these in challenges): "
+            "- NOT YET LEARNED FOR CHALLENGES/EXAMS (do NOT require these there): "
             + ", ".join(not_available)
         )
 
@@ -335,6 +357,7 @@ class AIEngine:
         code: str,
         output: str,
         validation_summary: str = "",
+        forbidden_summary: str = "",
         interaction_type: str = "review",
     ) -> str:
         numbered_lines = [f"{i:3d} | {line}" for i, line in enumerate(code.splitlines(), 1)]
@@ -350,6 +373,14 @@ class AIEngine:
 
         if validation_summary:
             compound += f"\n\n**Concept validation (automated):**\n{validation_summary}"
+
+        if forbidden_summary:
+            compound += (
+                f"\n\n**Skill boundary advisory (automated):**\n{forbidden_summary}\n"
+                "The student may have used concepts not yet taught. "
+                "Consider this in your review but use your judgment — "
+                "the student might have a valid reason or have learned it independently."
+            )
 
         return self.send_message(conversation_history, compound, interaction_type=interaction_type)
 
@@ -384,3 +415,31 @@ def parse_exam_verdict(response: str) -> str:
     if re.search(r"\[EXAM_FAIL\]", response):
         return "fail"
     return "unknown"
+
+
+@dataclass
+class ReviewMeta:
+    understanding: str = "partial"    # "none", "partial", "full"
+    code_quality: str = "adequate"    # "poor", "adequate", "good"
+    struggle_concepts: list[str] = field(default_factory=list)
+    approach: str = "standard"        # "standard", "creative"
+
+
+_REVIEW_META_PATTERN = re.compile(r"```review_meta\s*\n?(.*?)\n?\s*```", re.DOTALL)
+
+
+def parse_review_meta(response: str) -> ReviewMeta:
+    """Extract structured review metadata from Sensei's response."""
+    m = _REVIEW_META_PATTERN.search(response)
+    if not m:
+        return ReviewMeta()
+    try:
+        data = json.loads(m.group(1))
+        return ReviewMeta(
+            understanding=data.get("understanding", "partial"),
+            code_quality=data.get("code_quality", "adequate"),
+            struggle_concepts=data.get("struggle_concepts", []),
+            approach=data.get("approach", "standard"),
+        )
+    except (json.JSONDecodeError, TypeError):
+        return ReviewMeta()

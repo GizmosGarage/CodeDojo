@@ -46,10 +46,24 @@ def _collect_concept_hits(tree: ast.Module) -> set[str]:
     has_compare = False
     has_bool_logic = False
     has_assign = False
+    has_if_else = False
+    has_while_loop = False
+    has_for_loop = False
+    has_list = False
+    has_dict = False
+    has_function_def = False
+    has_import = False
+    has_string_method = False
+
+    _STRING_METHODS = {"upper", "lower", "strip", "replace"}
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            call_names.add(node.func.id)
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                call_names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in _STRING_METHODS:
+                    has_string_method = True
         elif isinstance(node, ast.JoinedStr):
             has_joined_str = True
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
@@ -70,6 +84,20 @@ def _collect_concept_hits(tree: ast.Module) -> set[str]:
             has_bool_logic = True
         elif isinstance(node, (ast.Assign, ast.AugAssign)):
             has_assign = True
+        elif isinstance(node, ast.If):
+            has_if_else = True
+        elif isinstance(node, ast.While):
+            has_while_loop = True
+        elif isinstance(node, ast.For):
+            has_for_loop = True
+        elif isinstance(node, ast.List):
+            has_list = True
+        elif isinstance(node, ast.Dict):
+            has_dict = True
+        elif isinstance(node, ast.FunctionDef):
+            has_function_def = True
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            has_import = True
 
     hits: set[str] = set()
     builtins_map = {
@@ -104,6 +132,22 @@ def _collect_concept_hits(tree: ast.Module) -> set[str]:
         hits.add("boolean logic")
     if has_assign:
         hits.add("variable assignment")
+    if has_if_else:
+        hits.add("if/else")
+    if has_while_loop:
+        hits.add("while loop")
+    if has_for_loop:
+        hits.add("for loop")
+    if has_list:
+        hits.add("list")
+    if has_dict:
+        hits.add("dict")
+    if has_function_def:
+        hits.add("function def")
+    if has_import:
+        hits.add("import")
+    if has_string_method:
+        hits.add("string method")
     return hits
 
 
@@ -129,6 +173,14 @@ KNOWN_CONCEPTS = frozenset(
         "comparison",
         "boolean logic",
         "variable assignment",
+        "if/else",
+        "while loop",
+        "for loop",
+        "list",
+        "dict",
+        "function def",
+        "import",
+        "string method",
     }
 )
 
@@ -170,3 +222,78 @@ def validate_concepts(code: str, required_concepts: list[str]) -> ValidationResu
         missing=missing,
         unknown=unknown,
     )
+
+
+# --- Forbidden concept detection (advisory) ---
+
+# White belt fundamentals — always allowed regardless of skills_taught.
+BASELINE_ALLOWED: frozenset[str] = frozenset(
+    {
+        "variable assignment",
+        "print()",
+        "f-string",
+        "string concatenation",
+        "//",
+        "%",
+        "**",
+        "comparison",
+        "boolean logic",
+        "round()",
+        "abs()",
+        "max()",
+        "min()",
+        "type()",
+        "float()",
+        "int()",
+        "str()",
+    }
+)
+
+# Maps each curriculum skill to the additional AST concepts it unlocks.
+SKILL_UNLOCKED_CONCEPTS: dict[str, set[str]] = {
+    "if/else conditional statements": {"if/else"},
+    "elif chains": {"if/else"},
+    "input() and type conversion": {"input()", "int()", "float()", "str()"},
+    "while loops": {"while loop"},
+    "for loops and range()": {"for loop"},
+    "basic string methods (.upper(), .lower(), .strip(), .replace())": {"string method"},
+    "len() function": {"len()"},
+}
+
+
+@dataclass
+class ForbiddenConceptResult:
+    found_forbidden: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        if not self.found_forbidden:
+            return ""
+        return (
+            "- Concepts used that haven't been taught yet: "
+            + ", ".join(self.found_forbidden)
+        )
+
+
+def detect_forbidden_concepts(
+    code: str,
+    taught_skills: list[str],
+) -> ForbiddenConceptResult:
+    """Detect AST concepts in code that the student hasn't been taught yet.
+
+    Advisory only — does not block submission.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ForbiddenConceptResult()
+
+    hits = _collect_concept_hits(tree)
+
+    # Build the set of allowed concepts from baseline + taught skills
+    allowed = set(BASELINE_ALLOWED)
+    for skill in taught_skills:
+        allowed.update(SKILL_UNLOCKED_CONCEPTS.get(skill, set()))
+
+    # Only flag concepts we can actually detect (in KNOWN_CONCEPTS)
+    forbidden = sorted(hits & KNOWN_CONCEPTS - allowed)
+    return ForbiddenConceptResult(found_forbidden=forbidden)

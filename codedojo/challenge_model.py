@@ -11,4 +11,5 @@ class ChallengeSpec:
     brief_description: str = ""             # short setup/context for the challenge
     what_to_do: list[str] = field(default_factory=list)  # concrete task steps
     expected_output: str = ""               # exact/near-exact output target for the student
+    test_input: str = ""                    # stdin input to feed when running/grading (one value per line)
     narrative: str = ""                      # full Sensei text shown to student
