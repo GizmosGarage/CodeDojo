@@ -1,7 +1,30 @@
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+ENV/
+
+# Local dojo files
+solution.py
 codedojo/data/progress.json
 codedojo/data/session_log.jsonl
-solution.py
+codedojo/data/interrupted_challenge.json
+codedojo/data/belt_exam.json
+codedojo/data/knowledge_model.pt
+
+# IDE and local tooling
+.vscode/
+.idea/
 .claude/
+
+# OS files
+Thumbs.db
+.DS_Store

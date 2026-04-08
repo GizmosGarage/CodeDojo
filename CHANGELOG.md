@@ -2,6 +2,12 @@
 
 All notable changes to CodeDojo are documented here.
 
+## [0.3.1] - 2026-04-08
+
+### Changed
+- **License changed from MIT to AGPL-3.0** to protect Sensei as a proprietary product while keeping the codebase open for users to download and run
+- Restored full `.gitignore` protections for model weights, exam state, and IDE/OS files
+
 ## [0.3.0] - 2026-04-08
 
 ### Added

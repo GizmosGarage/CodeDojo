@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/anthropic-claude-6B4FBB?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude API">
   <img src="https://img.shields.io/badge/pytorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" alt="PyTorch">
-  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=for-the-badge" alt="AGPL-3.0 License">
 </p>
 
 <h1 align="center">CodeDojo</h1>
@@ -248,4 +248,8 @@ The test suite covers the REPL, challenge generation, lesson parsing, code execu
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See [LICENSE](LICENSE) for the full text.
+
+You are free to use, modify, and distribute this software under the terms of the AGPL-3.0. If you run a modified version of CodeDojo as a network service, you must make your modified source code available to users of that service.
+
+**Note:** Trained model weights, aggregated training data, and proprietary Sensei model checkpoints are separate works and are not covered by this license.
